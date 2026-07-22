@@ -1,0 +1,65 @@
+diff --git a/G7SensorKit/G7SensorKit/G7CGMManager/G7Sensor.swift b/G7SensorKit/G7SensorKit/G7CGMManager/G7Sensor.swift
+index b7c7023..294a049 100644
+--- a/G7SensorKit/G7SensorKit/G7CGMManager/G7Sensor.swift
++++ b/G7SensorKit/G7SensorKit/G7CGMManager/G7Sensor.swift
+@@ -84,6 +84,16 @@ public final class G7Sensor: G7BluetoothManagerDelegate {
+     /// Used to detect connections that do not authenticate, signalling possible sensor switchover
+     private var pendingAuth: Bool = false
+ 
++    /// Consecutive connections that ended without authenticating. A single such
++    /// connection is routinely caused by transient BLE stack issues (stale GATT
++    /// cache, dropped auth notification), so end-of-session is only suspected
++    /// after several in a row.
++    private var consecutiveUnauthenticatedDisconnects: Int = 0
++
++    /// Unauthenticated remote disconnects required before suspecting the
++    /// session was ended or transferred to another device.
++    private static let suspectedEndOfSessionThreshold = 3
++
+     /// The backfill data buffer
+     private var backfillBuffer: [G7BackfillMessage] = []
+ 
+@@ -200,9 +210,17 @@ public final class G7Sensor: G7BluetoothManagerDelegate {
+                 try peripheral.listenToCharacteristic(.authentication)
+                 self.pendingAuth = true
+             } catch let error {
++                // Failing to subscribe (e.g. unknownCharacteristic from a stale
++                // GATT cache) leaves this connection useless. Drop it so the
++                // next connection performs fresh service discovery instead of
++                // idling until the sensor disconnects us.
++                self.log.error("Error enabling auth notifications; disconnecting: %{public}@", String(describing: error))
+                 self.delegateQueue.async {
+                     self.delegate?.sensor(self, didError: error)
+                 }
++                DispatchQueue.global(qos: .utility).async {
++                    manager.disconnect()
++                }
+             }
+         }
+         return shouldStopScanning
+@@ -224,7 +242,16 @@ public final class G7Sensor: G7BluetoothManagerDelegate {
+ 
+             self.log.info("Sensor disconnected: wasRemoteDisconnect:%{public}@", String(describing: wasRemoteDisconnect))
+             if pendingAuth, wasRemoteDisconnect {
+-                suspectedEndOfSession = true // Normal disconnect without auth is likely that G7 app stopped this session
++                // A remote disconnect without auth is likely the G7 app having
++                // stopped this session — but a single occurrence is just as
++                // likely a transient BLE failure. Forgetting the sensor on one
++                // fluke forces a slow background rescan, so require several
++                // consecutive failures before suspecting end-of-session.
++                consecutiveUnauthenticatedDisconnects += 1
++                suspectedEndOfSession = consecutiveUnauthenticatedDisconnects >= Self.suspectedEndOfSessionThreshold
++                if suspectedEndOfSession {
++                    consecutiveUnauthenticatedDisconnects = 0
++                }
+             } else {
+                 suspectedEndOfSession = false
+             }
+@@ -317,6 +344,7 @@ public final class G7Sensor: G7BluetoothManagerDelegate {
+         if let message = AuthChallengeRxMessage(data: response), message.isBonded, message.isAuthenticated {
+             log.debug("Observed authenticated session. enabling notifications for control characteristic.")
+             pendingAuth = false
++            consecutiveUnauthenticatedDisconnects = 0
+             peripheralManager.perform { (peripheral) in
+                 do {
+                     try peripheral.listenToCharacteristic(.control)
