@@ -498,31 +498,36 @@ extension Home {
                     // warmup / stabilizing / expiry. Simulator has no
                     // CGMManager, so fall back to reading its synthetic
                     // lifecycle / highlight so the bobble sees the same
-                    // data shape a real CGM would deliver.
+                    // data shape a real CGM would deliver. Other non-manager
+                    // sources publish their own state through `GlucoseSource`.
                     let manager = self.fetchGlucoseManager.cgmManager
                     let source = self.fetchGlucoseManager.glucoseSource
                     let progress: DeviceLifecycleProgress?
-                    let highlight: DeviceStatusHighlight?
+                    let displayState: CgmDisplayState?
                     if let manager {
                         progress = manager.cgmLifecycleProgress
-                        highlight = manager.cgmStatusHighlight
+                        displayState = manager.cgmStatusHighlight.map {
+                            CgmDisplayState(
+                                localizedMessage: $0.localizedMessage,
+                                imageName: $0.imageName,
+                                status: CgmDisplayStatus.from($0.state)
+                            )
+                        }
                     } else if let sim = source as? GlucoseSimulatorSource {
                         progress = sim.cgmLifecycleProgress
-                        highlight = sim.cgmStatusHighlight
+                        displayState = sim.cgmStatusHighlight.map {
+                            CgmDisplayState(
+                                localizedMessage: $0.localizedMessage,
+                                imageName: $0.imageName,
+                                status: CgmDisplayStatus.from($0.state)
+                            )
+                        }
                     } else {
-                        progress = nil
-                        highlight = nil
+                        progress = source?.cgmProgressHighlight.value
+                        displayState = source?.cgmDisplayState.value
                     }
                     self.cgmProgressHighlight = progress
-                    if let highlight {
-                        self.cgmDisplayState = CgmDisplayState(
-                            localizedMessage: highlight.localizedMessage,
-                            imageName: highlight.imageName,
-                            status: CgmDisplayStatus.from(highlight.state)
-                        )
-                    } else {
-                        self.cgmDisplayState = nil
-                    }
+                    self.cgmDisplayState = displayState
                     self.cgmSensorExpiresAt = Self.resolveSensorExpiresAt(
                         manager: manager,
                         glucoseSource: source,
@@ -930,46 +935,8 @@ extension Home {
         }
 
         private func getCurrentGlucoseTarget() async {
-            let now = Date()
-            let calendar = Calendar.current
-
-            let entries: [(start: String, value: Decimal)] = bgTargets.targets.map { ($0.start, $0.low) }
-
-            for (index, entry) in entries.enumerated() {
-                guard let entryTime = TherapySettingsUtil.parseTime(entry.start) else {
-                    debug(.default, "Invalid entry start time: \(entry.start)")
-                    continue
-                }
-
-                let entryComponents = calendar.dateComponents([.hour, .minute, .second], from: entryTime)
-                let entryStartTime = calendar.date(
-                    bySettingHour: entryComponents.hour!,
-                    minute: entryComponents.minute!,
-                    second: entryComponents.second!,
-                    of: now
-                )!
-
-                let entryEndTime: Date
-                if index < entries.count - 1,
-                   let nextEntryTime = TherapySettingsUtil.parseTime(entries[index + 1].start)
-                {
-                    let nextEntryComponents = calendar.dateComponents([.hour, .minute, .second], from: nextEntryTime)
-                    entryEndTime = calendar.date(
-                        bySettingHour: nextEntryComponents.hour!,
-                        minute: nextEntryComponents.minute!,
-                        second: nextEntryComponents.second!,
-                        of: now
-                    )!
-                } else {
-                    entryEndTime = calendar.date(byAdding: .day, value: 1, to: entryStartTime)!
-                }
-
-                if now >= entryStartTime, now < entryEndTime {
-                    await MainActor.run {
-                        currentGlucoseTarget = entry.value
-                    }
-                    return
-                }
+            if let target = bgTargets.currentTarget() {
+                await MainActor.run { currentGlucoseTarget = target }
             }
         }
 
